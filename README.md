@@ -36,10 +36,21 @@
 ### 一键安装（推荐）
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/hankepeng/bbr-optimize/main/bbr-optimize.sh)
+curl -fsSL https://raw.githubusercontent.com/hankepeng/bbr-optimize/main/bbr-optimize.sh -o bbr-optimize.sh \
+  && bash bbr-optimize.sh
 ```
 
 执行后进入交互菜单，选择 `1` 即可一键应用优化配置。
+
+> 推荐「先下载后执行」而非 `bash <(curl ...)`：GitHub 的 `raw.githubusercontent.com` 在部分地区（特别是海外服务器）存在 **CDN 缓存滞后**，更新脚本后分支 URL 可能被边缘节点缓存旧版。先下载到本地文件再执行更稳定可靠。
+
+### 若不巧拉到旧版
+
+- 用**按提交 SHA 寻址**的 raw URL 强制取最新（绕开分支缓存）。示例：
+  ```bash
+  curl -fsSL https://raw.githubusercontent.com/hankepeng/bbr-optimize/42ce1cc0b96ab4e6eddf41ae3263bb343f66e1d4/bbr-optimize.sh -o bbr-optimize.sh
+  ```
+- 亦可直接查看仓库最新提交号替换上段链接中的 `42ce1c...`。
 
 ### 手动安装
 
@@ -57,7 +68,8 @@ bash bbr-optimize.sh
 ### 静默一键应用（无交互，适合批量部署）
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/hankepeng/bbr-optimize/main/bbr-optimize.sh) --apply
+curl -fsSL https://raw.githubusercontent.com/hankepeng/bbr-optimize/main/bbr-optimize.sh -o bbr-optimize.sh \
+  && bash bbr-optimize.sh --apply
 ```
 
 > 提示：`--apply` 会直接应用配置并打印验证结果后退出，不进入菜单，适合在无终端（无 TTY）环境下批量跑或集成到自动化工具。
