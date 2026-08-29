@@ -19,6 +19,11 @@ BACKUP_FILE="/etc/sysctl.conf.bak-bbr"
 RMEM_WMEM_MAX_64="67108864"
 # 小内存(<2048MB)缓冲区上限
 RMEM_WMEM_MAX_32="33554432"
+# bo 快捷命令相关
+BO_BIN="/usr/local/bin/bo"
+BO_INSTALL_DIR="/opt/bbr-optimize"
+BO_INSTALL_SCRIPT="$BO_INSTALL_DIR/bbr-optimize.sh"
+BO_RAW_BASE="https://raw.githubusercontent.com/hankepeng/bbr-optimize/main/bbr-optimize.sh"
 
 # ---------- 颜色 ----------
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'
@@ -197,6 +202,47 @@ bbr_active() {
     [[ "$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)" == "bbr" ]]
 }
 
+# 是否已全面优化（bbr 拥塞控制 + fq 队列）
+optimized() {
+    bbr_active \
+        && [[ "$(sysctl -n net.core.default_qdisc 2>/dev/null)" == "fq" ]]
+}
+
+# bo 快捷命令当前是否可用（阶段判断：存在且可执行）
+bo_state() {
+    [[ -x "$BO_BIN" ]]
+}
+
+# 启用 bo 快捷命令：将脚本安装到固定目录并建立软链
+enable_bo_shortcut() {
+    mkdir -p "$BO_INSTALL_DIR"
+    local src="${BASH_SOURCE[0]:-}"
+    if [[ -f "$src" && "$src" != /dev/fd/* ]]; then
+        cp -f "$src" "$BO_INSTALL_SCRIPT"
+    else
+        curl -fsSL "$BO_RAW_BASE" -o "$BO_INSTALL_SCRIPT" \
+            || { error "无法下载脚本，bo 快捷命令安装失败。"; return 1; }
+    fi
+    chmod +x "$BO_INSTALL_SCRIPT"
+    ln -sf "$BO_INSTALL_SCRIPT" "$BO_BIN"
+    ok "已启用 bo 快捷命令：之后在终端输入 bo 即可打开菜单。"
+}
+
+# 停用 bo 快捷命令
+disable_bo_shortcut() {
+    rm -f "$BO_BIN"
+    ok "已停用 bo 快捷命令。"
+}
+
+# 切换 bo 快捷命令的启用/停用
+toggle_bo_shortcut() {
+    if bo_state; then
+        disable_bo_shortcut
+    else
+        enable_bo_shortcut
+    fi
+}
+
 # ---------- 回滚 ----------
 rollback_config() {
     if [[ ! -f "$BACKUP_FILE" ]]; then
@@ -231,6 +277,18 @@ show_env() {
     echo "  内存       : ${MEM_MB:-未知} MB"
     echo "  包管理器   : ${PKG:-无}"
     echo "  BBR 支持   : $(kernel_supports_bbr && echo 是 || echo 否)"
+    if optimized; then
+        echo -e "  优化状态   : ${GREEN}已开启（bbr + fq）${NC}"
+    elif bbr_active; then
+        echo -e "  优化状态   : ${YELLOW}部分开启（拥塞算法为 bbr，但默认队列非 fq）${NC}"
+    else
+        echo -e "  优化状态   : ${RED}未开启 BBR（可用选项 1 一键优化）${NC}"
+    fi
+    if bo_state; then
+        echo -e "  bo 快捷命令: ${GREEN}已启用 → ${BO_BIN}${NC}"
+    else
+        echo -e "  bo 快捷命令: ${YELLOW}未启用（可用选项 6 开启）${NC}"
+    fi
     echo ""
 }
 
@@ -247,7 +305,9 @@ menu() {
         echo -e " ${GREEN}3)${NC} 验证当前 BBR 是否生效"
         echo -e " ${GREEN}4)${NC} 回滚到修改前的原配置"
         echo -e " ${GREEN}5)${NC} 卸载本脚本的配置（恢复 cubic 默认）"
-        echo -e " ${GREEN}q)${NC} 退出"
+        echo -e " ${GREEN}6)${NC} 启用/停用 bo 快捷命令（当前: $(bo_state && echo 已启用 || echo 已停用)）"
+        echo ""
+        echo -e " ${GREEN}0)${NC} 退出"
         echo ""
         read -rp "请输入序号并回车: " choice
         echo ""
@@ -257,7 +317,8 @@ menu() {
             3) verify_config ;;
             4) rollback_config ;;
             5) uninstall_config ;;
-            q|Q|0) echo "再见。"; exit 0 ;;
+            6) toggle_bo_shortcut ;;
+            0) echo "再见。"; exit 0 ;;
             *) error "无效输入，请重新选择。" ;;
         esac
         echo ""
