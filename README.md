@@ -50,6 +50,14 @@ bash bbr-optimize.sh
 
 > 脚本通过 `/tmp` 临时文件生成配置，不额外依赖第三方软件包，绝大多数主机可直接执行。
 
+### 静默一键应用（无交互，适合批量部署）
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/hankepeng/bbr-optimize/main/bbr-optimize.sh) --apply
+```
+
+> 提示：`--apply` 会直接应用配置并打印验证结果后退出，不进入菜单，适合在无终端（无 TTY）环境下批量跑或集成到自动化工具。
+
 ---
 
 ## 交互菜单说明
