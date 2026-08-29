@@ -33,30 +33,22 @@
 
 ## 快速开始
 
+> 下载命令统一使用 **GitHub Release** 地址（`/releases/latest/download/` 永远指向最新版本），比 `raw.githubusercontent.com` 的 `main` 分支 URL 更不容易被 CDN 缓存旧版。
+
 ### 一键安装（推荐）
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/hankepeng/bbr-optimize/main/bbr-optimize.sh -o bbr-optimize.sh \
+curl -fsSL https://github.com/hankepeng/bbr-optimize/releases/latest/download/bbr-optimize.sh -o bbr-optimize.sh \
   && bash bbr-optimize.sh
 ```
 
 执行后进入交互菜单，选择 `1` 即可一键应用优化配置。
 
-> 推荐「先下载后执行」而非 `bash <(curl ...)`：GitHub 的 `raw.githubusercontent.com` 在部分地区（特别是海外服务器）存在 **CDN 缓存滞后**，更新脚本后分支 URL 可能被边缘节点缓存旧版。先下载到本地文件再执行更稳定可靠。
-
-### 若不巧拉到旧版
-
-- 用**按提交 SHA 寻址**的 raw URL 强制取最新（绕开分支缓存）。示例：
-  ```bash
-  curl -fsSL https://raw.githubusercontent.com/hankepeng/bbr-optimize/42ce1cc0b96ab4e6eddf41ae3263bb343f66e1d4/bbr-optimize.sh -o bbr-optimize.sh
-  ```
-- 亦可直接查看仓库最新提交号替换上段链接中的 `42ce1c...`。
-
 ### 手动安装
 
 ```bash
 # 下载
-curl -fsSL https://raw.githubusercontent.com/hankepeng/bbr-optimize/main/bbr-optimize.sh -o bbr-optimize.sh
+curl -fsSL https://github.com/hankepeng/bbr-optimize/releases/latest/download/bbr-optimize.sh -o bbr-optimize.sh
 
 # 赋予执行权限并运行
 chmod +x bbr-optimize.sh
@@ -68,11 +60,21 @@ bash bbr-optimize.sh
 ### 静默一键应用（无交互，适合批量部署）
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/hankepeng/bbr-optimize/main/bbr-optimize.sh -o bbr-optimize.sh \
+curl -fsSL https://github.com/hankepeng/bbr-optimize/releases/latest/download/bbr-optimize.sh -o bbr-optimize.sh \
   && bash bbr-optimize.sh --apply
 ```
 
 > 提示：`--apply` 会直接应用配置并打印验证结果后退出，不进入菜单，适合在无终端（无 TTY）环境下批量跑或集成到自动化工具。
+
+### 指定版本安装
+
+如需固定某个具体版本（而非跟随最新版），把地址中的 `latest` 换成具体 tag：
+
+```bash
+# 例：v1.0.0
+curl -fsSL https://github.com/hankepeng/bbr-optimize/releases/download/v1.0.0/bbr-optimize.sh -o bbr-optimize.sh \
+  && bash bbr-optimize.sh
+```
 
 ### 快捷命令 `bo`（可选）
 
