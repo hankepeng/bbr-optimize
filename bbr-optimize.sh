@@ -92,10 +92,10 @@ build_config() {
     # 按内存选择缓冲区上限
     if [[ "$MEM_MB" -ge 2048 ]]; then
         rmem_max="$RMEM_WMEM_MAX_64"
-        info "检测到内存 ≥ 2G (${MEM_MB}MB)，使用 64M 缓冲区上限"
+        info "检测到内存 ≥ 2G (${MEM_MB}MB)，使用 64M 缓冲区上限" >&2
     else
         rmem_max="$RMEM_WMEM_MAX_32"
-        info "检测到内存 < 2G (${MEM_MB}MB)，使用 32M 缓冲区上限"
+        info "检测到内存 < 2G (${MEM_MB}MB)，使用 32M 缓冲区上限" >&2
     fi
 
     cat > /tmp/bbr-optimize.conf <<EOF
@@ -162,6 +162,14 @@ apply_config() {
     printf '\n' >> "$SYSCTL_CONF"
     cat "$conf_file" >> "$SYSCTL_CONF"
     echo "# ================= BBR/TCP 优化配置 (end) =================" >> "$SYSCTL_CONF"
+
+    # 校验配置段确实写入，避免 cat 失败却误报成功
+    if grep -q "# ================= BBR/TCP 优化配置" "$SYSCTL_CONF"; then
+        ok "打包写入 /etc/sysctl.conf 完成。"
+    else
+        error "配置写入失败，请检查文件权限或磁盘空间。"
+        return 1
+    fi
 
     info "应用配置并执行 sysctl -p ..."
     if sysctl -p "$SYSCTL_CONF" >/tmp/sysctl-p.log 2>&1; then
@@ -241,7 +249,7 @@ menu() {
         echo -e " ${GREEN}5)${NC} 卸载本脚本的配置（恢复 cubic 默认）"
         echo -e " ${GREEN}q)${NC} 退出"
         echo ""
-        read -rsp "请输入序号并回车: " choice
+        read -rp "请输入序号并回车: " choice
         echo ""
         case "$choice" in
             1) apply_config && info "配置已应用，请查看上方结果。" ;;
