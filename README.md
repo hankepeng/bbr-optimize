@@ -95,12 +95,10 @@ curl -fsSL https://github.com/hankepeng/bbr-optimize/releases/download/v1.0.0/bb
   系统       : Debian GNU/Linux 12 (bookworm)
   内核       : 6.1.0-50-cloud-amd64
   内存       : 973 MB
-  包管理器   : apt
-  内网 IP     : 10.0.0.5
-  公网 IP     : 12.34.56.78（Singapore, SG）
+  公网 IP    : 12.34.56.78（Singapore, SG）
+  公网 IPv6  : 240d:c000:f000:9100:9efa:730c:8a32:0
   BBR 支持   : 是
   优化状态   : 已开启（bbr + fq）
-  bo 快捷命令: 未启用（可用选项 6 开启）
 ```
 
 | 序号 | 功能 | 说明 |
