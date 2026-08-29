@@ -317,11 +317,6 @@ show_env() {
     else
         echo -e "  优化状态   : ${RED}未开启 BBR（可用选项 1 一键优化）${NC}"
     fi
-    if bo_state; then
-        echo -e "  bo 快捷命令: ${GREEN}已启用 → ${BO_BIN}${NC}"
-    else
-        echo -e "  bo 快捷命令: ${YELLOW}未启用（可用选项 6 开启）${NC}"
-    fi
     echo ""
 }
 
