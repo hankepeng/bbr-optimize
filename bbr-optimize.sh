@@ -78,13 +78,19 @@ detect_ip() {
     PUBLIC_IP="获取失败"; PUB_CITY=""; PUB_CC=""
     if command -v curl >/dev/null 2>&1; then
         local j
-        j="$(curl -4 -fsS --max-time 3 https://ipinfo.io/json 2>/dev/null)"
+        j="$(curl -4 -fsS --max-time 5 https://ipinfo.io/json 2>/dev/null)"
         if [[ -n "$j" ]]; then
-            PUBLIC_IP="$(printf '%s' "$j" | sed -n 's/.*"ip":"\([^"]*\)".*/\1/p')"
-            PUB_CITY="$(printf '%s' "$j" | sed -n 's/.*"city":"\([^"]*\)".*/\1/p')"
-            PUB_CC="$(printf '%s' "$j" | sed -n 's/.*"country":"\([^"]*\)".*/\1/p')"
-        else
-            PUBLIC_IP="$(curl -4 -fsS --max-time 3 https://ifconfig.me/ip 2>/dev/null)"
+            # ipinfo.io 返回的是带空格的缩进 JSON，正则需允许冒号后有任意空格
+            PUBLIC_IP="$(printf '%s' "$j" | sed -n 's/.*"ip": *"\([^"]*\)".*/\1/p')"
+            PUB_CITY="$(printf '%s' "$j" | sed -n 's/.*"city": *"\([^"]*\)".*/\1/p')"
+            PUB_CC="$(printf '%s' "$j" | sed -n 's/.*"country": *"\([^"]*\)".*/\1/p')"
+        fi
+        # 回退：ipinfo 不可达或解析为空时，依次尝试其他公网 IP 服务
+        if [[ -z "$PUBLIC_IP" ]]; then
+            PUBLIC_IP="$(curl -4 -fsS --max-time 5 https://api.ipify.org 2>/dev/null)"
+        fi
+        if [[ -z "$PUBLIC_IP" ]]; then
+            PUBLIC_IP="$(curl -4 -fsS --max-time 5 https://ifconfig.me/ip 2>/dev/null)"
         fi
     fi
     PUBLIC_IP="${PUBLIC_IP:-获取失败}"
