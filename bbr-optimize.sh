@@ -69,13 +69,18 @@ detect_system() {
     fi
 }
 
-# 探测本机 IP（内网 + 公网，带超时；只在启动时调用一次缓存）
+# 探测本机 IP（内网/公网，IPv4/IPv6，带超时；只在启动时调用一次缓存）
 detect_ip() {
     LOCAL_IP="$(ip -4 addr show scope global 2>/dev/null | awk '/inet /{print $2; exit}')"
     LOCAL_IP="${LOCAL_IP%%/*}"   # 去掉 /24 形式的子网前缀
     LOCAL_IP="${LOCAL_IP:-未知}"
 
+    LOCAL_IP6="$(ip -6 addr show scope global 2>/dev/null | awk '/inet6 /{print $2; exit}')"
+    LOCAL_IP6="${LOCAL_IP6%%/*}"  # 去掉 /64 形式的前缀
+    LOCAL_IP6="${LOCAL_IP6:-无}"
+
     PUBLIC_IP="获取失败"; PUB_CITY=""; PUB_CC=""
+    PUBLIC_IP6=""
     if command -v curl >/dev/null 2>&1; then
         local j
         j="$(curl -4 -fsS --max-time 5 https://ipinfo.io/json 2>/dev/null)"
@@ -92,8 +97,13 @@ detect_ip() {
         if [[ -z "$PUBLIC_IP" ]]; then
             PUBLIC_IP="$(curl -4 -fsS --max-time 5 https://ifconfig.me/ip 2>/dev/null)"
         fi
+        # 公网 IPv6：仅当本机存在全局 IPv6 时才尝试（避免多一次超时等待）
+        if [[ "$LOCAL_IP6" != "无" ]]; then
+            PUBLIC_IP6="$(curl -6 -fsS --max-time 5 https://api6.ipify.org 2>/dev/null)"
+        fi
     fi
     PUBLIC_IP="${PUBLIC_IP:-获取失败}"
+    PUBLIC_IP6="${PUBLIC_IP6:-无}"
 }
 
 # 判断内核是否支持 BBR（4.9+ 自带）
@@ -309,6 +319,8 @@ show_env() {
     else
         echo "  公网 IP    : ${PUBLIC_IP:-获取失败}"
     fi
+    echo "  内网 IPv6  : ${LOCAL_IP6:-无}"
+    echo "  公网 IPv6  : ${PUBLIC_IP6:-无}"
     echo "  BBR 支持   : $(kernel_supports_bbr && echo 是 || echo 否)"
     if optimized; then
         echo -e "  优化状态   : ${GREEN}已开启（bbr + fq）${NC}"
