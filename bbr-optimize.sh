@@ -69,6 +69,27 @@ detect_system() {
     fi
 }
 
+# 探测本机 IP（内网 + 公网，带超时；只在启动时调用一次缓存）
+detect_ip() {
+    LOCAL_IP="$(ip -4 addr show scope global 2>/dev/null | awk '/inet /{print $2; exit}')"
+    LOCAL_IP="${LOCAL_IP%/}"
+    LOCAL_IP="${LOCAL_IP:-未知}"
+
+    PUBLIC_IP="获取失败"; PUB_CITY=""; PUB_CC=""
+    if command -v curl >/dev/null 2>&1; then
+        local j
+        j="$(curl -4 -fsS --max-time 3 https://ipinfo.io/json 2>/dev/null)"
+        if [[ -n "$j" ]]; then
+            PUBLIC_IP="$(printf '%s' "$j" | sed -n 's/.*"ip":"\([^"]*\)".*/\1/p')"
+            PUB_CITY="$(printf '%s' "$j" | sed -n 's/.*"city":"\([^"]*\)".*/\1/p')"
+            PUB_CC="$(printf '%s' "$j" | sed -n 's/.*"country":"\([^"]*\)".*/\1/p')"
+        else
+            PUBLIC_IP="$(curl -4 -fsS --max-time 3 https://ifconfig.me/ip 2>/dev/null)"
+        fi
+    fi
+    PUBLIC_IP="${PUBLIC_IP:-获取失败}"
+}
+
 # 判断内核是否支持 BBR（4.9+ 自带）
 kernel_supports_bbr() {
     local major minor
@@ -276,6 +297,12 @@ show_env() {
     echo "  内核       : ${KERNEL_REL:-未知}"
     echo "  内存       : ${MEM_MB:-未知} MB"
     echo "  包管理器   : ${PKG:-无}"
+    echo "  内网 IP     : ${LOCAL_IP:-未知}"
+    if [[ -n "${PUB_CITY:-}" ]]; then
+        echo "  公网 IP     : ${PUBLIC_IP:-获取失败}（${PUB_CITY}${PUB_CC:+, ${PUB_CC}}）"
+    else
+        echo "  公网 IP     : ${PUBLIC_IP:-获取失败}"
+    fi
     echo "  BBR 支持   : $(kernel_supports_bbr && echo 是 || echo 否)"
     if optimized; then
         echo -e "  优化状态   : ${GREEN}已开启（bbr + fq）${NC}"
@@ -343,5 +370,8 @@ if [[ "${1:-}" == "--apply" ]]; then
     verify_config
     exit 0
 fi
+
+# 进入交互菜单前探测一次 IP（缓存，避免菜单刷新时重复请求）
+detect_ip
 
 menu
