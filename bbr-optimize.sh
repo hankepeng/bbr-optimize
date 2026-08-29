@@ -303,11 +303,11 @@ show_env() {
     echo "  内核       : ${KERNEL_REL:-未知}"
     echo "  内存       : ${MEM_MB:-未知} MB"
     echo "  包管理器   : ${PKG:-无}"
-    echo "  内网 IP     : ${LOCAL_IP:-未知}"
+    echo "  内网 IP    : ${LOCAL_IP:-未知}"
     if [[ -n "${PUB_CITY:-}" ]]; then
-        echo "  公网 IP     : ${PUBLIC_IP:-获取失败}（${PUB_CITY}${PUB_CC:+, ${PUB_CC}}）"
+        echo "  公网 IP    : ${PUBLIC_IP:-获取失败}（${PUB_CITY}${PUB_CC:+, ${PUB_CC}}）"
     else
-        echo "  公网 IP     : ${PUBLIC_IP:-获取失败}"
+        echo "  公网 IP    : ${PUBLIC_IP:-获取失败}"
     fi
     echo "  BBR 支持   : $(kernel_supports_bbr && echo 是 || echo 否)"
     if optimized; then
