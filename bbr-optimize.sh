@@ -265,4 +265,14 @@ detect_system
 
 # 避免 set -e 在菜单的 while 中误退出
 set +e
+
+# 非交互模式：--apply 直接应用并验证后退出（适合批量化/无 TTY 场景）
+if [[ "${1:-}" == "--apply" ]]; then
+    info "非交互模式：直接应用 BBR/TCP 优化配置。"
+    apply_config
+    echo ""
+    verify_config
+    exit 0
+fi
+
 menu
