@@ -72,7 +72,7 @@ detect_system() {
 # 探测本机 IP（内网 + 公网，带超时；只在启动时调用一次缓存）
 detect_ip() {
     LOCAL_IP="$(ip -4 addr show scope global 2>/dev/null | awk '/inet /{print $2; exit}')"
-    LOCAL_IP="${LOCAL_IP%/}"
+    LOCAL_IP="${LOCAL_IP%%/*}"   # 去掉 /24 形式的子网前缀
     LOCAL_IP="${LOCAL_IP:-未知}"
 
     PUBLIC_IP="获取失败"; PUB_CITY=""; PUB_CC=""
