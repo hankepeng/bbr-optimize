@@ -69,7 +69,7 @@ kernel_supports_bbr() {
     local major minor
     major=$(echo "$KERNEL_REL" | awk -F'.' '{print $1}')
     minor=$(echo "$KERNEL_REL" | awk -F'.' '{print $2}')
-    if [[ "$major" -gt 4 ]] || { [[ "$major" -eq 4 ]] && [[ "$minor" -ge 9 ]]; then
+    if [[ "$major" -gt 4 ]] || { [[ "$major" -eq 4 ]] && [[ "$minor" -ge 9 ]]; }; then
         return 0
     fi
     return 1
