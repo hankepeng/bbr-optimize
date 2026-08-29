@@ -101,13 +101,15 @@ curl -fsSL https://github.com/hankepeng/bbr-optimize/releases/download/v1.0.0/bb
 
 | 序号 | 功能 | 说明 |
 |------|------|------|
-| `1` | 一键应用推荐配置 | 自动按内存选择缓冲区大小，应用并执行 `sysctl -p` |
-| `2` | 仅预览配置 | 只打印将写入的内容，不修改系统 |
+| `1` | 一键应用推荐配置 | 自动按内存选择缓冲区上限，应用并执行 `sysctl -p`，结束后展示本次所有修改的参数与原因，并做健康检查 |
+| `2` | 仅预览配置 | 只打印将写入的内容与参数修改原因，不修改系统 |
 | `3` | 验证 BBR 是否生效 | 显示拥塞算法、队列算法、缓冲区上限 |
 | `4` | 回滚原配置 | 恢复脚本修改前的 `/etc/sysctl.conf` |
 | `5` | 卸载 | 移除脚本写入内容，拥塞控制回退为 cubic |
 | `6` | 启用/停用 `bo` 快捷命令 | 可一键进入菜单的终端快捷命令 |
 | `0` | 退出 | 退出脚本 |
+
+选择 `1` 应用后，会额外输出 **「本次修改的参数与原因」清单**与**「健康检查与建议」**，帮助你了解每一项改动的作用。
 
 ---
 
@@ -121,14 +123,15 @@ net.ipv4.tcp_congestion_control = bbr
 
 ### 长肥管道缓冲区优化
 ```
-# 2G+ 内存为 64M，1G 内存自动为 32M（脚本自动选择）
+# 2G+ 内存上限为 64M，1G 内存自动为 32M（脚本自动选择）
 net.core.rmem_max = 67108864
 net.core.wmem_max = 67108864
-net.core.rmem_default = 33554432
-net.core.wmem_default = 33554432
+net.core.rmem_default = 212992
+net.core.wmem_default = 212992
 net.ipv4.tcp_rmem = 4096 87380 67108864
 net.ipv4.tcp_wmem = 4096 65536 67108864
 ```
+> 说明：只放大**上限值**，默认收发缓冲保持小值(212992，约 208K)，避免小内存机器并发一多就 OOM。
 
 ### 队列与并发优化
 ```
@@ -154,6 +157,16 @@ net.ipv4.tcp_slow_start_after_idle = 0
 net.ipv4.tcp_no_metrics_save = 1
 net.ipv4.tcp_tw_reuse = 1
 net.ipv4.tcp_window_scaling = 1
+```
+
+### 高并发连接扩展优化
+```
+# 放大本地源端口范围（默认 32768~60999 偏窄，高并发短连接易端口不足）
+net.ipv4.ip_local_port_range = 1024 65535
+# 扩容 TIME_WAIT 桶（默认 4096 偏小，连接洪峰可能被丢）
+net.ipv4.tcp_max_tw_buckets = 8192
+# 开启 RFC1337，防 TIME_WAIT 攻击
+net.ipv4.tcp_rfc1337 = 1
 ```
 
 ---
