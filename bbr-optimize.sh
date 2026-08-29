@@ -17,6 +17,12 @@ BACKUP_FILE="/etc/sysctl.conf.bak-bbr"
 RMEM_WMEM_MAX_64="67108864"
 # 小内存(<2048MB)缓冲区上限
 RMEM_WMEM_MAX_32="33554432"
+# 默认收发缓冲(保持小值：只放大上限，避免小内存机器连接数一多即 OOM)
+RMEM_WMEM_DEFAULT="212992"
+# 本地源端口范围(放大以支撑高并发短连接)
+IP_LOCAL_PORT_RANGE="1024 65535"
+# TIME_WAIT 桶数量(扩容防连接洪峰被丢)
+TW_BUCKETS="8192"
 # bo 快捷命令相关
 BO_BIN="/usr/local/bin/bo"
 BO_INSTALL_DIR="/opt/bbr-optimize"
@@ -127,6 +133,9 @@ load_bbr_module() {
 }
 
 # ---------- 配置生成 ----------
+# 生成简体中文说明清单（参数|新值|原因），应用后展示给用户
+CHANGES_FILE="/tmp/bbr-optimize.changes"
+
 build_config() {
     local rmem_max
     # 按内存选择缓冲区上限
@@ -144,11 +153,11 @@ build_config() {
 net.core.default_qdisc = fq
 net.ipv4.tcp_congestion_control = bbr
 
-# 长肥管道缓冲区优化
+# 长肥管道缓冲区优化（只放大上限，默认值保持小值，防止小内存机器 OOM）
 net.core.rmem_max = ${rmem_max}
 net.core.wmem_max = ${rmem_max}
-net.core.rmem_default = 33554432
-net.core.wmem_default = 33554432
+net.core.rmem_default = ${RMEM_WMEM_DEFAULT}
+net.core.wmem_default = ${RMEM_WMEM_DEFAULT}
 net.ipv4.tcp_rmem = 4096 87380 ${rmem_max}
 net.ipv4.tcp_wmem = 4096 65536 ${rmem_max}
 
@@ -171,8 +180,55 @@ net.ipv4.tcp_slow_start_after_idle = 0
 net.ipv4.tcp_no_metrics_save = 1
 net.ipv4.tcp_tw_reuse = 1
 net.ipv4.tcp_window_scaling = 1
+
+# 高并发连接扩展优化
+net.ipv4.tcp_rfc1337 = 1
+net.ipv4.tcp_max_tw_buckets = ${TW_BUCKETS}
+net.ipv4.ip_local_port_range = ${IP_LOCAL_PORT_RANGE}
 EOF
+
+    # 生成参数与修改原因清单（应用后展示）
+    cat > "$CHANGES_FILE" <<EOF
+net.ipv4.tcp_congestion_control|bbr|启用 BBR 拥塞控制，降低长距离链路排队时延、提升吞吐
+net.core.default_qdisc|fq|为 BBR 搭配 FQ 公平队列，削峰填谷、降低抖动
+net.core.rmem_max / wmem_max|${rmem_max}|放大收发缓冲上限，适配"长肥管道"高带宽高延迟链路(按内存自动)
+net.core.rmem_default / wmem_default|${RMEM_WMEM_DEFAULT}|保持默认缓冲为小值，避免小内存机器并发一多即 OOM
+net.ipv4.tcp_rmem / tcp_wmem|4096...${rmem_max}|三段式缓冲(最小/默认/上限)，兼顾小包延迟与高吞吐
+net.core.netdev_max_backlog|10000|加大网卡接收队列，扛瞬时流量突发
+net.core.somaxconn|4096|加大 accept 队列，缓解连接洪峰排队
+net.ipv4.tcp_max_syn_backlog|8192|加大半连接(SYN)队列，抗 SYN 突发与握手丢包
+net.ipv4.tcp_fastopen|3|开启 TCP Fast Open(Client+Server)，减少建连往返时延
+net.ipv4.tcp_early_retrans|3|提前重传，降低慢链路丢包造成的感知时延
+net.ipv4.tcp_retries2|8|加快失败连接回收，减少无效重传与内存占用
+net.ipv4.tcp_fin_timeout|15|缩短 FIN_WAIT 等待，加速连接释放
+net.ipv4.tcp_mtu_probing|1|开启路径 MTU 探测，规避大包被分片或丢包的黑洞
+net.ipv4.tcp_slow_start_after_idle|0|空闲重连不重置慢启动，利于低频长连接满速
+net.ipv4.tcp_no_metrics_save|1|不缓存路由度量，避免旧快照干扰新路径
+net.ipv4.tcp_tw_reuse|1|复用 TIME_WAIT 端口，降低高并发短连接端口不足
+net.ipv4.ip_local_port_range|${IP_LOCAL_PORT_RANGE}|放大本地源端口范围(原默认 32768~60999 偏窄)，支撑更高并发
+net.ipv4.tcp_max_tw_buckets|${TW_BUCKETS}|扩容 TIME_WAIT 桶(原 4096 偏小)，防连接洪峰被丢弃
+net.ipv4.tcp_rfc1337|1|开启 RFC1337 防 TIME_WAIT 攻击
+EOF
+
     echo "/tmp/bbr-optimize.conf"
+}
+
+# 展示"本次修改的参数清单 + 原因"
+show_changes() {
+    if [[ ! -f "$CHANGES_FILE" ]]; then
+        return 0
+    fi
+    echo ""
+    echo -e "${CYAN}========== 本次修改的参数与原因 ==========${NC}"
+    printf "%-38s %-22s %s\n" "参数" "新值" "原因"
+    echo "----------------------------------------------------------------------------------------"
+    local param newv reason
+    while IFS='|' read -r param newv reason; do
+        printf "%-38s %-22s %s\n" "$param" "$newv" "$reason"
+    done < "$CHANGES_FILE"
+    echo "----------------------------------------------------------------------------------------"
+    echo "注：实际是否生效以『验证』(菜单 3) 为准。"
+    echo ""
 }
 
 # ---------- 备份 ----------
@@ -215,11 +271,19 @@ apply_config() {
     if sysctl -p "$SYSCTL_CONF" >/tmp/sysctl-p.log 2>&1; then
         ok "sysctl 全部生效，无报错。"
     else
-        # 部分内核对个别参数不识别，做容错
-        warn "sysctl -p 部分参数报错（通常为内核过新/过旧不支持），尝试逐条放宽处理..."
-        # 说明：以下仅作为提示，不阻塞
-        grep -i "unknown\|No such file" /tmp/sysctl-p.log | head -n 20 || true
+        # 部分内核对个别参数不识别（过新/过旧），做容错：列出失败项但不中断
+        local not_applied=0
+        while IFS= read -r line; do
+            if [[ "$line" =~ unknown\ key|No\ such\ file|unable ]]; then
+                warn "  未生效: $line"
+                not_applied=1
+            fi
+        done < /tmp/sysctl-p.log
+        [[ "$not_applied" -eq 1 ]] && warn "个别参数当前内核不支持，已跳过（不影响 BBR 主功能）。"
     fi
+
+    # 应用后展示本次改动的参数与原因
+    show_changes
 }
 
 # ---------- 验证 ----------
@@ -230,6 +294,56 @@ verify_config() {
     echo -e "□ 队列算法：\n   当前 $(sysctl -n net.core.default_qdisc 2>/dev/null || echo 未知)"
     echo -e "□ 缓冲区上限(rmem_max)：\n   $(sysctl -n net.core.rmem_max 2>/dev/null || echo 未知)"
     echo -e "□ 内核 BBR 可用性：$(grep -qw bbr /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null && echo 可用 || echo 不可用)"
+}
+
+# ---------- 环境健康检查（应用时给出分析与建议） ----------
+health_check() {
+    echo ""
+    echo -e "${CYAN}========== 健康检查与建议 ==========${NC}"
+
+    # 1. 内存 / 默认缓冲风险
+    if [[ "${MEM_MB:-0}" -lt 2048 ]]; then
+        warn "小内存机器(${MEM_MB}MB)：默认收发缓冲已设为小值(${RMEM_WMEM_DEFAULT})，仅放大上限，降低并发 OOM 风险。"
+    fi
+
+    # 2. 是否无 swap（无 swap 时 swappiness 意义不大）
+    if [[ -r /proc/meminfo ]]; then
+        local swaptotal swappiness
+        swaptotal=$(awk '/^SwapTotal/{print $2}' /proc/meminfo)
+        swappiness=$(cat /proc/sys/vm/swappiness 2>/dev/null || echo 60)
+        if [[ "${swaptotal:-0}" -eq 0 ]]; then
+            info "本机无 Swap：swappiness(${swappiness}) 实际影响有限；如需缓存更激进可将系统内存调大。"
+        fi
+    fi
+
+    # 3. 源端口范围
+    local port_range pstart
+    port_range="$(sysctl -n net.ipv4.ip_local_port_range 2>/dev/null || echo '32768 60999')"
+    read -r pstart _ < <(printf '%s' "$port_range")
+    if [[ -n "$pstart" && "$pstart" -gt 1024 ]]; then
+        warn "本地源端口范围(${port_range})偏窄：高并发短连接下可能端口不足，建议扩至 ${IP_LOCAL_PORT_RANGE}。"
+    else
+        info "本地源端口范围 ${port_range}：已覆盖高并发场景。"
+    fi
+
+    # 4. TIME_WAIT 桶
+    local twb
+    twb="$(sysctl -n net.ipv4.tcp_max_tw_buckets 2>/dev/null || echo -)"
+    if [[ "$twb" != "-" && "$twb" -lt 8192 ]]; then
+        warn "TIME_WAIT 桶(${twb})偏小：高并发可能丢连接，建议 ≥8192。"
+    fi
+
+    # 5. 是否存在旧的自定义优化段落（用户在脚本之外手动加的，可能与脚本段冲突）
+    if grep -q "^net\.ipv4\.tcp_congestion_control\|^net\.ipv4\.tcp_rmem\|^net\.core\.rmem_max" "$SYSCTL_CONF"; then
+        local elsewhere
+        elsewhere=$(grep -n "^net\.ipv4\.tcp_congestion_control\|^net\.core\.rmem_max\|^net\.ipv4\.tcp_rmem" "$SYSCTL_CONF" \
+            | grep -v "^[0-9]*:.*# ================= BBR/TCP 优化配置" | wc -l)
+        if [[ "$elsewhere" -gt 0 ]]; then
+            warn "检测到脚本段落之外还有同名的 TCP 参数（可能手动添加）：重复定义可能导致值被覆盖，建议删除旧的自定义项。"
+        fi
+    fi
+
+    echo ""
 }
 
 # 判断 BBR 是否真正生效
@@ -347,8 +461,8 @@ menu() {
         read -rp "请输入序号并回车: " choice
         echo ""
         case "$choice" in
-            1) apply_config && info "配置已应用，请查看上方结果。" ;;
-            2) echo "---- 即将写入的配置预览 ----"; cat "$(build_config)" ;;  # 预览但不写库
+            1) apply_config && { info "配置已应用，请查看上方结果。"; health_check; } ;;
+            2) echo "---- 即将写入的配置预览 ----"; build_config >/dev/null; cat /tmp/bbr-optimize.conf; show_changes ;;  # 预览但不写库
             3) verify_config ;;
             4) rollback_config ;;
             5) uninstall_config ;;
@@ -376,6 +490,7 @@ if [[ "${1:-}" == "--apply" ]]; then
     apply_config
     echo ""
     verify_config
+    health_check
     exit 0
 fi
 
