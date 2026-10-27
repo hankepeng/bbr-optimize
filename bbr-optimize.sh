@@ -3,7 +3,7 @@
 # BBR / TCP 一键优化脚本（通用，适用于绝大多数 Linux 服务器）
 # 说明：
 #   1. 自动识别系统 / 包管理器 / 内核版本
-#   2. 按内存大小自动选择缓冲区配置（1G 用 32M，2G+ 用 64M）
+#   2. 按带宽档位选择缓冲区上限（并受内存上限保护，避免小内存 OOM）
 #   3. 修改前自动备份 /etc/sysctl.conf，支持一键回滚
 #   4. 对内核不支持的参数做容错（不报错即成功）
 # ============================================================================
@@ -13,10 +13,19 @@ set -euo pipefail
 # ---------- 全局变量 ----------
 SYSCTL_CONF="/etc/sysctl.conf"
 BACKUP_FILE="/etc/sysctl.conf.bak-bbr"
-# 大内存(>=2048MB)缓冲区上限
-RMEM_WMEM_MAX_64="67108864"
-# 小内存(<2048MB)缓冲区上限
-RMEM_WMEM_MAX_32="33554432"
+# 内存保护上限：缓冲区再大也不超过这个值
+RMEM_WMEM_MAX_64="67108864"   # >=2048MB 内存
+RMEM_WMEM_MAX_32="33554432"   # <2048MB 内存
+
+# 带宽档位：缓冲区上限按"带宽 × RTT"的 BDP 量级估算，留足余量
+#   1 = ≤10Mbps     → 4M    （常见入门轻量套餐，BDP 仅百 KB 级）
+#   2 = 10-100Mbps  → 16M   （主流轻量套餐）
+#   3 = ≥100Mbps    → 64M   （大带宽 / 千兆，BDP 可达数十 MB）
+TIER_FILE="/etc/bbr-optimize.tier"
+TIER_1_MAX="4194304"
+TIER_2_MAX="16777216"
+TIER_3_MAX="67108864"
+DEFAULT_TIER="2"
 # 默认收发缓冲(保持小值：只放大上限，避免小内存机器连接数一多即 OOM)
 RMEM_WMEM_DEFAULT="212992"
 # 本地源端口范围(放大以支撑高并发短连接)
@@ -136,19 +145,91 @@ load_bbr_module() {
 # 生成简体中文说明清单（参数|新值|原因），应用后展示给用户
 CHANGES_FILE="/tmp/bbr-optimize.changes"
 
+# ---------- 带宽档位 ----------
+tier_name() {
+    case "${1:-}" in
+        1) echo "≤10Mbps（入门轻量）" ;;
+        2) echo "10–100Mbps（主流轻量）" ;;
+        3) echo "≥100Mbps（大带宽/千兆）" ;;
+        *) echo "未设置" ;;
+    esac
+}
+
+# 读取生效档位（未设置时回落到默认档）
+current_tier() {
+    local t=""
+    [[ -r "$TIER_FILE" ]] && t="$(head -n1 "$TIER_FILE" 2>/dev/null | tr -d '[:space:]')"
+    case "$t" in
+        1|2|3) echo "$t" ;;
+        *) echo "$DEFAULT_TIER" ;;
+    esac
+}
+
+tier_configured() {
+    local t=""
+    [[ -r "$TIER_FILE" ]] && t="$(head -n1 "$TIER_FILE" 2>/dev/null | tr -d '[:space:]')"
+    case "$t" in 1|2|3) return 0 ;; *) return 1 ;; esac
+}
+
+# 环境中显示的档位文案（未设置时标注"默认"）
+tier_label() {
+    if tier_configured; then
+        tier_name "$(current_tier)"
+    else
+        echo "$(tier_name "$(current_tier)")（默认）"
+    fi
+}
+
+# 交互设置带宽档位
+set_tier() {
+    echo ""
+    echo -e "${CYAN}========== 设置带宽档位 ==========${NC}"
+    echo "  缓冲区上限按带宽档位选择（≈ 带宽 × RTT 的 BDP 量级）："
+    echo "    1) ≤10Mbps       → 上限 4M"
+    echo "    2) 10–100Mbps    → 上限 16M"
+    echo "    3) ≥100Mbps      → 上限 64M"
+    echo ""
+    echo "  当前档位: $(tier_label)"
+    echo "  提示: 填错了也不影响正确性，只是缓冲区偏大或偏小；可用测速确认套餐带宽。"
+    local c
+    read -rp "请选择档位 [1/2/3，直接回车保持当前]: " c
+    [[ -z "$c" ]] && c="$(current_tier)"
+    case "$c" in
+        1|2|3)
+            printf '%s\n' "$c" > "$TIER_FILE"
+            ok "已设置带宽档位: $(tier_name "$c")"
+            info "该档位将在下次『应用配置』时生效。"
+            ;;
+        *) error "无效输入，档位未修改。" ;;
+    esac
+}
+
+# 按档位取缓冲区上限，再受内存上限保护
+tier_buffer_max() {
+    local tier mem_cap rmem_max
+    tier="$(current_tier)"
+    case "$tier" in
+        1) rmem_max="$TIER_1_MAX" ;;
+        2) rmem_max="$TIER_2_MAX" ;;
+        3) rmem_max="$TIER_3_MAX" ;;
+    esac
+    if [[ "$MEM_MB" -lt 2048 ]]; then mem_cap="$RMEM_WMEM_MAX_32"; else mem_cap="$RMEM_WMEM_MAX_64"; fi
+    if [[ "$rmem_max" -gt "$mem_cap" ]]; then
+        warn "档位所需缓冲(${rmem_max}) 超过内存(${MEM_MB}MB)可承受上限，已收敛为 ${mem_cap}。" >&2
+        rmem_max="$mem_cap"
+    fi
+    echo "$rmem_max"
+}
+
 build_config() {
     local rmem_max
-    # 按内存选择缓冲区上限
-    if [[ "$MEM_MB" -ge 2048 ]]; then
-        rmem_max="$RMEM_WMEM_MAX_64"
-        info "检测到内存 ≥ 2G (${MEM_MB}MB)，使用 64M 缓冲区上限" >&2
-    else
-        rmem_max="$RMEM_WMEM_MAX_32"
-        info "检测到内存 < 2G (${MEM_MB}MB)，使用 32M 缓冲区上限" >&2
-    fi
+    # 按带宽档位选择缓冲区上限（并受内存上限保护）
+    rmem_max="$(tier_buffer_max)"
+    info "带宽档位：$(tier_name "$(current_tier)") → 缓冲区上限 ${rmem_max}" >&2
 
     cat > /tmp/bbr-optimize.conf <<EOF
 # ================= BBR/TCP 优化配置 (由 bbr-optimize.sh 写入) =================
+# 带宽档位: $(current_tier) （$(tier_name "$(current_tier)")）
 # 核心拥塞控制与队列
 net.core.default_qdisc = fq
 net.ipv4.tcp_congestion_control = bbr
@@ -191,7 +272,7 @@ EOF
     cat > "$CHANGES_FILE" <<EOF
 net.ipv4.tcp_congestion_control|bbr|启用 BBR 拥塞控制，降低长距离链路排队时延、提升吞吐
 net.core.default_qdisc|fq|为 BBR 搭配 FQ 公平队列，削峰填谷、降低抖动
-net.core.rmem_max / wmem_max|${rmem_max}|放大收发缓冲上限，适配"长肥管道"高带宽高延迟链路(按内存自动)
+net.core.rmem_max / wmem_max|${rmem_max}|按带宽档位选择上限(≈带宽×RTT 的 BDP)，并受内存上限保护
 net.core.rmem_default / wmem_default|${RMEM_WMEM_DEFAULT}|保持默认缓冲为小值，避免小内存机器并发一多即 OOM
 net.ipv4.tcp_rmem / tcp_wmem|4096...${rmem_max}|三段式缓冲(最小/默认/上限)，兼顾小包延迟与高吞吐
 net.core.netdev_max_backlog|10000|加大网卡接收队列，扛瞬时流量突发
@@ -343,6 +424,9 @@ health_check() {
         fi
     fi
 
+    # 6. 带宽档位提示
+    info "当前带宽档位: $(tier_label)，缓冲区上限 $(tier_buffer_max)；若与套餐实际带宽不符，用菜单 7 调整后重新应用。"
+
     echo ""
 }
 
@@ -424,6 +508,7 @@ show_env() {
     echo "  系统       : ${OS_NAME:-未知} ${OS_VERSION:-}"
     echo "  内核       : ${KERNEL_REL:-未知}"
     echo "  内存       : ${MEM_MB:-未知} MB"
+    echo "  带宽档位   : $(tier_label)"
     if [[ -n "${PUB_CITY:-}" ]]; then
         echo "  公网 IP    : ${PUBLIC_IP:-获取失败}（${PUB_CITY}${PUB_CC:+, ${PUB_CC}}）"
     else
@@ -449,12 +534,13 @@ menu() {
         echo -e "${CYAN}         BBR / TCP 一键优化脚本 (跨境节点版)${NC}"
         echo -e "${CYAN}====================================================${NC}"
         show_env
-        echo -e " ${GREEN}1)${NC} 一键应用推荐优化配置（自动按内存选择）"
+        echo -e " ${GREEN}1)${NC} 一键应用推荐优化配置（按带宽档位选参）"
         echo -e " ${GREEN}2)${NC} 仅预览将写入的配置（不修改系统）"
         echo -e " ${GREEN}3)${NC} 验证当前 BBR 是否生效"
         echo -e " ${GREEN}4)${NC} 回滚到修改前的原配置"
         echo -e " ${GREEN}5)${NC} 卸载本脚本的配置（恢复 cubic 默认）"
         echo -e " ${GREEN}6)${NC} 启用/停用 bo 快捷命令（当前: $(bo_state && echo 已启用 || echo 已停用)）"
+        echo -e " ${GREEN}7)${NC} 设置带宽档位（当前: $(tier_label)）"
         echo ""
         echo -e " ${GREEN}0)${NC} 退出"
         echo ""
@@ -467,6 +553,7 @@ menu() {
             4) rollback_config ;;
             5) uninstall_config ;;
             6) toggle_bo_shortcut ;;
+            7) set_tier ;;
             0) echo "再见。"; exit 0 ;;
             *) error "无效输入，请重新选择。" ;;
         esac
