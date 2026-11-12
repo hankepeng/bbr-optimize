@@ -28,6 +28,11 @@ TIER_3_MAX="67108864"
 DEFAULT_TIER="2"
 # 默认收发缓冲(保持小值：只放大上限，避免小内存机器连接数一多即 OOM)
 RMEM_WMEM_DEFAULT="212992"
+# tcp_rmem/tcp_wmem 的默认段(三段式中间值)：256K
+#   该值决定连接初始窗口，是单流吞吐的起步门槛：
+#   160ms RTT 下，208K 约对应 ~10Mbps 单流上限，256K 约对应 ~13Mbps；
+#   内核会按实际链路自适应上探(不超过第三段上限)，低延迟场景也会自动收敛，不会吃亏
+TCP_MEM_DEFAULT="262144"
 # 本地源端口范围(放大以支撑高并发短连接)
 IP_LOCAL_PORT_RANGE="1024 65535"
 # TIME_WAIT 桶数量(扩容防连接洪峰被丢)
@@ -234,13 +239,13 @@ build_config() {
 net.core.default_qdisc = fq
 net.ipv4.tcp_congestion_control = bbr
 
-# 长肥管道缓冲区优化（只放大上限，默认值保持小值，防止小内存机器 OOM）
+# 长肥管道缓冲区优化（core 默认值保持小值防 OOM；tcp 默认段 256K 抬高单流起步吞吐）
 net.core.rmem_max = ${rmem_max}
 net.core.wmem_max = ${rmem_max}
 net.core.rmem_default = ${RMEM_WMEM_DEFAULT}
 net.core.wmem_default = ${RMEM_WMEM_DEFAULT}
-net.ipv4.tcp_rmem = 4096 87380 ${rmem_max}
-net.ipv4.tcp_wmem = 4096 65536 ${rmem_max}
+net.ipv4.tcp_rmem = 4096 ${TCP_MEM_DEFAULT} ${rmem_max}
+net.ipv4.tcp_wmem = 4096 ${TCP_MEM_DEFAULT} ${rmem_max}
 
 # 队列与并发优化
 net.core.netdev_max_backlog = 10000
@@ -274,7 +279,7 @@ net.ipv4.tcp_congestion_control|bbr|启用 BBR 拥塞控制，降低长距离链
 net.core.default_qdisc|fq|为 BBR 搭配 FQ 公平队列，削峰填谷、降低抖动
 net.core.rmem_max / wmem_max|${rmem_max}|按带宽档位选择上限(≈带宽×RTT 的 BDP)，并受内存上限保护
 net.core.rmem_default / wmem_default|${RMEM_WMEM_DEFAULT}|保持默认缓冲为小值，避免小内存机器并发一多即 OOM
-net.ipv4.tcp_rmem / tcp_wmem|4096...${rmem_max}|三段式缓冲(最小/默认/上限)，兼顾小包延迟与高吞吐
+net.ipv4.tcp_rmem / tcp_wmem|4096 ${TCP_MEM_DEFAULT} ${rmem_max}|三段式缓冲(最小/默认/上限)，默认段提到 256K 抬高单流吞吐起步门槛，内核按链路自适应
 net.core.netdev_max_backlog|10000|加大网卡接收队列，扛瞬时流量突发
 net.core.somaxconn|4096|加大 accept 队列，缓解连接洪峰排队
 net.ipv4.tcp_max_syn_backlog|8192|加大半连接(SYN)队列，抗 SYN 突发与握手丢包
