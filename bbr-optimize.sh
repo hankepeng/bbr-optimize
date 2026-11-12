@@ -12,14 +12,17 @@ set -euo pipefail
 
 # ---------- 全局变量 ----------
 # 脚本版本号（在线升级时会读取远端脚本中的同名变量做比较）
-SCRIPT_VERSION="1.0.8"
+SCRIPT_VERSION="1.0.9"
 # 在线升级用的下载地址（/releases/latest/download/ 永远指向最新发布）
 REMOTE_SCRIPT_URL="https://github.com/hankepeng/bbr-optimize/releases/latest/download/bbr-optimize.sh"
 SYSCTL_CONF="/etc/sysctl.conf"
 BACKUP_FILE="/etc/sysctl.conf.bak-bbr"
 # 内存保护上限：缓冲区再大也不超过这个值
-RMEM_WMEM_MAX_64="67108864"   # >=2048MB 内存
-RMEM_WMEM_MAX_32="33554432"   # <2048MB 内存
+RMEM_WMEM_MAX_64="67108864"   # 充裕内存
+RMEM_WMEM_MAX_32="33554432"   # 内存偏小
+# 区分"充裕内存"与"内存偏小"的阈值(MB)
+#   2G 机型的 MemTotal 通常只显示约 1979MB（内核占用一部分），不能用 2048 直接比较
+MEM_LARGE_MB="1800"
 
 # 带宽档位：缓冲区上限按"带宽 × RTT"的 BDP 量级估算，留足余量
 #   1 = ≤10Mbps     → 4M    （常见入门轻量套餐，BDP 仅百 KB 级）
@@ -217,7 +220,7 @@ set_tier() {
 
 # TIME_WAIT 桶上限：应不小于源端口范围宽度，否则短连接洪峰时桶先溢出，内核会强杀 TIME_WAIT
 tw_buckets() {
-    if [[ "${MEM_MB:-0}" -ge 2048 ]]; then echo 65536
+    if [[ "${MEM_MB:-0}" -ge "$MEM_LARGE_MB" ]]; then echo 65536
     elif [[ "${MEM_MB:-0}" -ge 1024 ]]; then echo 32768
     else echo 16384
     fi
@@ -225,7 +228,7 @@ tw_buckets() {
 
 # 孤儿套接字上限（进程已关闭 fd、但仍在内核里占用内存的 socket）
 tcp_orphans() {
-    if [[ "${MEM_MB:-0}" -ge 2048 ]]; then echo 32768
+    if [[ "${MEM_MB:-0}" -ge "$MEM_LARGE_MB" ]]; then echo 32768
     elif [[ "${MEM_MB:-0}" -ge 1024 ]]; then echo 16384
     else echo 8192
     fi
@@ -244,20 +247,27 @@ tcp_mem_triplet() {
     echo "$p0 $p1 $p2"
 }
 
-# 按档位取缓冲区上限，再受内存上限保护
-tier_buffer_max() {
-    local tier mem_cap rmem_max
-    tier="$(current_tier)"
-    case "$tier" in
-        1) rmem_max="$TIER_1_MAX" ;;
-        2) rmem_max="$TIER_2_MAX" ;;
-        3) rmem_max="$TIER_3_MAX" ;;
+# 档位对应的名义缓冲区上限（未做内存收敛）
+tier_raw_max() {
+    case "$(current_tier)" in
+        1) echo "$TIER_1_MAX" ;;
+        2) echo "$TIER_2_MAX" ;;
+        3) echo "$TIER_3_MAX" ;;
     esac
-    if [[ "$MEM_MB" -lt 2048 ]]; then mem_cap="$RMEM_WMEM_MAX_32"; else mem_cap="$RMEM_WMEM_MAX_64"; fi
-    if [[ "$rmem_max" -gt "$mem_cap" ]]; then
-        warn "档位所需缓冲(${rmem_max}) 超过内存(${MEM_MB}MB)可承受上限，已收敛为 ${mem_cap}。" >&2
-        rmem_max="$mem_cap"
-    fi
+}
+
+# 内存可承受的缓冲区上限
+mem_buffer_cap() {
+    if [[ "${MEM_MB:-0}" -lt "$MEM_LARGE_MB" ]]; then echo "$RMEM_WMEM_MAX_32"; else echo "$RMEM_WMEM_MAX_64"; fi
+}
+
+# 按档位取缓冲区上限，再受内存上限保护
+# 注意：该函数会被 $() 调用（子shell），因此不做告警，收敛说明统一由 health_check 输出
+tier_buffer_max() {
+    local rmem_max mem_cap
+    rmem_max="$(tier_raw_max)"
+    mem_cap="$(mem_buffer_cap)"
+    if [[ "$rmem_max" -gt "$mem_cap" ]]; then rmem_max="$mem_cap"; fi
     echo "$rmem_max"
 }
 
@@ -431,7 +441,7 @@ verify_config() {
     echo -e "□ 拥塞控制算法：\n   当前 $(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo 未知)"
     echo -e "□ 队列算法：\n   当前 $(sysctl -n net.core.default_qdisc 2>/dev/null || echo 未知)"
     echo -e "□ 缓冲区上限(rmem_max)：\n   $(sysctl -n net.core.rmem_max 2>/dev/null || echo 未知)"
-    echo -e "□ 源端口范围 / TIME_WAIT 桶：\n   $(sysctl -n net.ipv4.ip_local_port_range 2>/dev/null || echo 未知) / $(sysctl -n net.ipv4.tcp_max_tw_buckets 2>/dev/null || echo 未知)"
+    echo -e "□ 源端口范围 / TIME_WAIT 桶：\n   $(sysctl -n net.ipv4.ip_local_port_range 2>/dev/null | tr -s '[:space:]' ' ' || echo 未知) / $(sysctl -n net.ipv4.tcp_max_tw_buckets 2>/dev/null || echo 未知)"
     echo -e "□ 长连接保活(时间/间隔/次数)：\n   $(sysctl -n net.ipv4.tcp_keepalive_time 2>/dev/null || echo 未知) / $(sysctl -n net.ipv4.tcp_keepalive_intvl 2>/dev/null || echo 未知) / $(sysctl -n net.ipv4.tcp_keepalive_probes 2>/dev/null || echo 未知)"
     echo -e "□ 内核 BBR 可用性：$(grep -qw bbr /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null && echo 可用 || echo 不可用)"
 }
@@ -441,9 +451,11 @@ health_check() {
     echo ""
     echo -e "${CYAN}========== 健康检查与建议 ==========${NC}"
 
-    # 1. 内存 / 默认缓冲风险
-    if [[ "${MEM_MB:-0}" -lt 2048 ]]; then
-        warn "小内存机器(${MEM_MB}MB)：默认收发缓冲已设为小值(${RMEM_WMEM_DEFAULT})，仅放大上限，降低并发 OOM 风险。"
+    # 1. 内存与默认缓冲风险
+    if [[ "${MEM_MB:-0}" -lt 1024 ]]; then
+        warn "内存偏小(${MEM_MB}MB)：默认收发缓冲已设为小值(${RMEM_WMEM_DEFAULT})，仅放大上限，避免并发时 OOM。"
+    elif [[ "${MEM_MB:-0}" -lt "$MEM_LARGE_MB" ]]; then
+        info "内存 ${MEM_MB}MB（不足 2G）：缓冲区上限按内存收敛为 $(mem_buffer_cap)，属于保护策略。"
     fi
 
     # 2. 是否无 swap（无 swap 时 swappiness 意义不大）
@@ -452,18 +464,21 @@ health_check() {
         swaptotal=$(awk '/^SwapTotal/{print $2}' /proc/meminfo)
         swappiness=$(cat /proc/sys/vm/swappiness 2>/dev/null || echo 60)
         if [[ "${swaptotal:-0}" -eq 0 ]]; then
-            info "本机无 Swap：swappiness(${swappiness}) 实际影响有限；如需缓存更激进可将系统内存调大。"
+            info "本机无 Swap：swappiness(${swappiness}) 在无 swap 环境下基本无影响，可忽略。"
         fi
     fi
 
     # 3. 源端口范围
-    local port_range pstart
-    port_range="$(sysctl -n net.ipv4.ip_local_port_range 2>/dev/null || echo '32768 60999')"
-    read -r pstart _ < <(printf '%s' "$port_range")
-    if [[ -n "$pstart" && "$pstart" -gt 1024 ]]; then
-        warn "本地源端口范围(${port_range})偏窄：高并发短连接下可能端口不足，建议扩至 ${IP_LOCAL_PORT_RANGE}。"
+    # 注意：sysctl 输出的两个数字之间是 TAB，按空白统一切分，避免直接做数值比较时报语法错误
+    local port_range pstart pend
+    port_range="$(sysctl -n net.ipv4.ip_local_port_range 2>/dev/null | tr -s '[:space:]' ' ' | sed 's/^ //; s/ $//')"
+    [[ -z "$port_range" ]] && port_range="32768 60999"
+    pstart="$(printf '%s' "$port_range" | awk '{print $1}')"
+    pend="$(printf '%s' "$port_range" | awk '{print $2}')"
+    if [[ "$port_range" == "$IP_LOCAL_PORT_RANGE" ]]; then
+        info "本地源端口范围 ${port_range}：符合推荐配置。"
     else
-        info "本地源端口范围 ${port_range}：已覆盖高并发场景。"
+        warn "本地源端口范围(${port_range})与推荐值(${IP_LOCAL_PORT_RANGE})不一致：范围偏窄时高并发短连接可能端口耗尽。"
     fi
 
     # 4. TIME_WAIT 桶
@@ -475,9 +490,8 @@ health_check() {
     fi
 
     # 5. 监听端口是否落在临时端口范围内（重载时可能被出站连接抢占而绑定失败）
-    if command -v ss >/dev/null 2>&1; then
-        local pend port conflict=""
-        pend="${port_range##* }"
+    if command -v ss >/dev/null 2>&1 && [[ "$pstart" =~ ^[0-9]+$ && "$pend" =~ ^[0-9]+$ ]]; then
+        local port conflict=""
         while read -r port; do
             [[ "$port" =~ ^[0-9]+$ ]] || continue
             if [[ "$port" -ge "$pstart" && "$port" -le "$pend" ]]; then
@@ -486,22 +500,29 @@ health_check() {
         done < <(ss -lntH 2>/dev/null | awk '{print $4}' | sed 's/.*://' | sort -u)
         if [[ -n "$conflict" ]]; then
             warn "监听端口${conflict} 落在临时端口范围(${port_range})内：出站连接可能占用同一端口，导致服务重载时绑定失败。"
-            info "  建议把这类端口排除出临时端口：sysctl -w net.ipv4.ip_local_reserved_ports=60058,60059（按需替换为实际端口）"
+            info "  建议把这类端口排除出临时端口：sysctl -w net.ipv4.ip_local_reserved_ports=端口1,端口2（替换为实际端口）"
         fi
     fi
 
-    # 6. 是否存在旧的自定义优化段落（用户在脚本之外手动加的，可能与脚本段冲突）
-    if grep -q "^net\.ipv4\.tcp_congestion_control\|^net\.ipv4\.tcp_rmem\|^net\.core\.rmem_max" "$SYSCTL_CONF"; then
-        local elsewhere
-        elsewhere=$(grep -n "^net\.ipv4\.tcp_congestion_control\|^net\.core\.rmem_max\|^net\.ipv4\.tcp_rmem" "$SYSCTL_CONF" \
-            | grep -v "^[0-9]*:.*# ================= BBR/TCP 优化配置" | wc -l)
-        if [[ "$elsewhere" -gt 0 ]]; then
-            warn "检测到脚本段落之外还有同名的 TCP 参数（可能手动添加）：重复定义可能导致值被覆盖，建议删除旧的自定义项。"
-        fi
+    # 6. 是否存在脚本段落之外的同名参数（手动添加的旧配置，会与脚本段互相覆盖）
+    local elsewhere
+    elsewhere="$(awk '
+        /^# ================= BBR\/TCP 优化配置 \(end\)/ { inblk=0; next }
+        /^# ================= BBR\/TCP 优化配置/       { inblk=1; next }
+        !inblk && /^net\.(ipv4\.tcp_(congestion_control|rmem|wmem)|core\.(rmem|wmem)_max)/ { n++ }
+        END { print n+0 }
+    ' "$SYSCTL_CONF" 2>/dev/null)"
+    if [[ "${elsewhere:-0}" -gt 0 ]]; then
+        warn "检测到脚本段落之外还有 ${elsewhere} 条同名的 TCP 参数（可能手动添加）：后写的会覆盖先写的，建议清理旧的自定义项。"
     fi
 
     # 7. 带宽档位提示
-    info "当前带宽档位: $(tier_label)，缓冲区上限 $(tier_buffer_max)；若与套餐实际带宽不符，用菜单 7 调整后重新应用。"
+    local want got
+    want="$(tier_raw_max)"; got="$(tier_buffer_max)"
+    info "当前带宽档位: $(tier_label)，缓冲区上限 ${got}；若与套餐实际带宽不符，用菜单 7 调整后重新应用。"
+    if [[ "$got" -lt "$want" ]]; then
+        warn "该档位建议上限 ${want} 已按内存(${MEM_MB}MB)收敛为 ${got}：属正常保护，想要更大上限需增加内存。"
+    fi
 
     echo ""
 }
