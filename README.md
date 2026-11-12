@@ -142,10 +142,14 @@ net.core.rmem_max = 67108864
 net.core.wmem_max = 67108864
 net.core.rmem_default = 212992
 net.core.wmem_default = 212992
-net.ipv4.tcp_rmem = 4096 87380 67108864
-net.ipv4.tcp_wmem = 4096 65536 67108864
+net.ipv4.tcp_rmem = 4096 262144 67108864
+net.ipv4.tcp_wmem = 4096 262144 67108864
 ```
-> 说明：只放大**上限值**，默认收发缓冲保持小值(212992，约 208K)，避免小内存机器并发一多就 OOM。
+> 说明：
+> - `net.core.rmem_default / wmem_default` 保持小值(212992，约 208K)，避免小内存机器并发一多就 OOM。
+> - `tcp_rmem / tcp_wmem` 的**默认段**（三段式中间值）由内核默认的 64K/85K 提到 **256K**。这个值决定连接初始窗口，是单流吞吐的起步门槛（按 窗口 ÷ RTT 估算）：
+>   - 160ms RTT 下，64K 窗口约对应单流上限 ~3Mbps，256K 可到 ~13Mbps；
+>   - 内核会按实际链路自适应上探（上限即第三段），**低延迟场景会自动收敛**，不会因此变差。
 
 ### 队列与并发优化
 ```
