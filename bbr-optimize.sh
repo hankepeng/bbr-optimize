@@ -11,6 +11,10 @@
 set -euo pipefail
 
 # ---------- 全局变量 ----------
+# 脚本版本号（在线升级时会读取远端脚本中的同名变量做比较）
+SCRIPT_VERSION="1.0.7"
+# 在线升级用的下载地址（/releases/latest/download/ 永远指向最新发布）
+REMOTE_SCRIPT_URL="https://github.com/hankepeng/bbr-optimize/releases/latest/download/bbr-optimize.sh"
 SYSCTL_CONF="/etc/sysctl.conf"
 BACKUP_FILE="/etc/sysctl.conf.bak-bbr"
 # 内存保护上限：缓冲区再大也不超过这个值
@@ -41,7 +45,7 @@ TW_BUCKETS="8192"
 BO_BIN="/usr/local/bin/bo"
 BO_INSTALL_DIR="/opt/bbr-optimize"
 BO_INSTALL_SCRIPT="$BO_INSTALL_DIR/bbr-optimize.sh"
-BO_RAW_BASE="https://raw.githubusercontent.com/hankepeng/bbr-optimize/main/bbr-optimize.sh"
+BO_RAW_BASE="$REMOTE_SCRIPT_URL"
 
 # ---------- 颜色 ----------
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'
@@ -531,12 +535,108 @@ show_env() {
     echo ""
 }
 
+# ---------- 在线升级 ----------
+# $1 是否高于 $2（版本号按点分段比较）
+ver_gt() {
+    [[ "$1" != "$2" ]] || return 1
+    [[ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n1)" == "$1" ]]
+}
+
+# 从脚本文件中解析版本号
+parse_version() {
+    grep -m1 '^SCRIPT_VERSION=' "$1" 2>/dev/null \
+        | sed 's/^SCRIPT_VERSION=//; s/["'"'"']//g' | tr -d '[:space:]'
+}
+
+upgrade_script() {
+    local tmp remote_ver ans self updated
+    tmp="$(mktemp /tmp/bbr-optimize.upgrade.XXXXXX)" || { error "无法创建临时文件。"; return 1; }
+
+    info "正在获取最新版本（网络不佳时可能需要几秒）..."
+    if ! curl -fsSL --max-time 20 "$REMOTE_SCRIPT_URL" -o "$tmp"; then
+        error "下载最新脚本失败，请检查网络或稍后重试。"
+        rm -f "$tmp"
+        return 1
+    fi
+
+    # 下载内容先做语法校验，避免把损坏文件覆盖到本地
+    if ! bash -n "$tmp" 2>/dev/null; then
+        error "下载的脚本语法校验未通过，已放弃升级（本地文件未改动）。"
+        rm -f "$tmp"
+        return 1
+    fi
+
+    remote_ver="$(parse_version "$tmp")"
+    echo "  当前版本 : v${SCRIPT_VERSION}"
+    echo "  最新版本 : ${remote_ver:+v${remote_ver}}${remote_ver:-未知}"
+
+    if [[ -z "$remote_ver" ]]; then
+        warn "无法解析远端版本号，为避免误覆盖，已跳过自动升级。"
+        rm -f "$tmp"
+        return 1
+    fi
+    if [[ "$remote_ver" == "$SCRIPT_VERSION" ]] || ! ver_gt "$remote_ver" "$SCRIPT_VERSION"; then
+        ok "已是最新版本（v${SCRIPT_VERSION}），无需升级。"
+        rm -f "$tmp"
+        return 0
+    fi
+
+    read -rp "确认升级到 v${remote_ver}？[y/N]: " ans
+    if [[ ! "$ans" =~ ^[Yy]$ ]]; then
+        info "已取消升级。"
+        rm -f "$tmp"
+        return 0
+    fi
+
+    updated=""
+    # 1. 脚本本身是实体文件时原地替换
+    self="${BASH_SOURCE[0]:-}"
+    if [[ -n "$self" && -f "$self" && "$self" != /dev/fd/* && "$self" != /dev/stdin ]]; then
+        if cp -f "$tmp" "$self" && chmod +x "$self"; then
+            ok "已升级当前脚本：${self}"
+            updated="$self"
+        else
+            error "写入 ${self} 失败，请检查权限。"
+        fi
+    fi
+
+    # 2. 已安装 bo 快捷命令时同步更新
+    if [[ -f "$BO_INSTALL_SCRIPT" ]]; then
+        if cp -f "$tmp" "$BO_INSTALL_SCRIPT" && chmod +x "$BO_INSTALL_SCRIPT"; then
+            ok "已同步更新 bo 快捷命令：${BO_INSTALL_SCRIPT}"
+            [[ -z "$updated" ]] && updated="$BO_INSTALL_SCRIPT"
+        else
+            warn "更新 ${BO_INSTALL_SCRIPT} 失败。"
+        fi
+    fi
+
+    # 3. 通过管道/进程替换运行（无实体文件）时，安装到固定目录
+    if [[ -z "$updated" ]]; then
+        mkdir -p "$BO_INSTALL_DIR" 2>/dev/null
+        if cp -f "$tmp" "$BO_INSTALL_SCRIPT" && chmod +x "$BO_INSTALL_SCRIPT"; then
+            ok "已保存新版本到：${BO_INSTALL_SCRIPT}"
+            updated="$BO_INSTALL_SCRIPT"
+        fi
+    fi
+
+    rm -f "$tmp"
+
+    if [[ -z "$updated" ]]; then
+        error "升级未能写入任何文件。"
+        return 1
+    fi
+
+    info "3 秒后自动重启脚本以加载新版本（Ctrl+C 可取消）..."
+    sleep 3
+    exec bash "$updated"
+}
+
 # ---------- 主菜单 ----------
 menu() {
     while true; do
         clear
         echo -e "${CYAN}====================================================${NC}"
-        echo -e "${CYAN}         BBR / TCP 一键优化脚本 (跨境节点版)${NC}"
+        echo -e "${CYAN}      BBR / TCP 一键优化脚本   v${SCRIPT_VERSION}${NC}"
         echo -e "${CYAN}====================================================${NC}"
         show_env
         echo -e " ${GREEN}1)${NC} 一键应用推荐优化配置（按带宽档位选参）"
@@ -546,6 +646,7 @@ menu() {
         echo -e " ${GREEN}5)${NC} 卸载本脚本的配置（恢复 cubic 默认）"
         echo -e " ${GREEN}6)${NC} 启用/停用 bo 快捷命令（当前: $(bo_state && echo 已启用 || echo 已停用)）"
         echo -e " ${GREEN}7)${NC} 设置带宽档位（当前: $(tier_label)）"
+        echo -e " ${GREEN}8)${NC} 在线升级脚本（当前版本: v${SCRIPT_VERSION}）"
         echo ""
         echo -e " ${GREEN}0)${NC} 退出"
         echo ""
@@ -559,6 +660,7 @@ menu() {
             5) uninstall_config ;;
             6) toggle_bo_shortcut ;;
             7) set_tier ;;
+            8) upgrade_script ;;
             0) echo "再见。"; exit 0 ;;
             *) error "无效输入，请重新选择。" ;;
         esac
