@@ -12,7 +12,7 @@ set -euo pipefail
 
 # ---------- 全局变量 ----------
 # 脚本版本号（在线升级时会读取远端脚本中的同名变量做比较）
-SCRIPT_VERSION="1.0.7"
+SCRIPT_VERSION="1.0.8"
 # 在线升级用的下载地址（/releases/latest/download/ 永远指向最新发布）
 REMOTE_SCRIPT_URL="https://github.com/hankepeng/bbr-optimize/releases/latest/download/bbr-optimize.sh"
 SYSCTL_CONF="/etc/sysctl.conf"
@@ -37,10 +37,12 @@ RMEM_WMEM_DEFAULT="212992"
 #   160ms RTT 下，208K 约对应 ~10Mbps 单流上限，256K 约对应 ~13Mbps；
 #   内核会按实际链路自适应上探(不超过第三段上限)，低延迟场景也会自动收敛，不会吃亏
 TCP_MEM_DEFAULT="262144"
-# 本地源端口范围(放大以支撑高并发短连接)
-IP_LOCAL_PORT_RANGE="1024 65535"
-# TIME_WAIT 桶数量(扩容防连接洪峰被丢)
-TW_BUCKETS="8192"
+# 本地源端口范围(放大以支撑高并发短连接；避开 1024~9999 里常见的系统服务端口)
+IP_LOCAL_PORT_RANGE="10000 65535"
+# 长连接保活：默认 7200s 太长，手机切网/掉线后要两小时才能发现死连接
+TCP_KEEPALIVE_TIME="300"
+TCP_KEEPALIVE_INTVL="30"
+TCP_KEEPALIVE_PROBES="3"
 # bo 快捷命令相关
 BO_BIN="/usr/local/bin/bo"
 BO_INSTALL_DIR="/opt/bbr-optimize"
@@ -213,6 +215,35 @@ set_tier() {
     esac
 }
 
+# TIME_WAIT 桶上限：应不小于源端口范围宽度，否则短连接洪峰时桶先溢出，内核会强杀 TIME_WAIT
+tw_buckets() {
+    if [[ "${MEM_MB:-0}" -ge 2048 ]]; then echo 65536
+    elif [[ "${MEM_MB:-0}" -ge 1024 ]]; then echo 32768
+    else echo 16384
+    fi
+}
+
+# 孤儿套接字上限（进程已关闭 fd、但仍在内核里占用内存的 socket）
+tcp_orphans() {
+    if [[ "${MEM_MB:-0}" -ge 2048 ]]; then echo 32768
+    elif [[ "${MEM_MB:-0}" -ge 1024 ]]; then echo 16384
+    else echo 8192
+    fi
+}
+
+# TCP 全局内存三段水位（单位：页，1 页 = 4KB）
+#   按物理内存比例取 6.25% / 12.5% / 25%，与内核开机自算的比例同量级；
+#   显式写入可避免开机时可用内存偏低导致水位被压得过低（进而限制窗口上探）
+tcp_mem_triplet() {
+    local pages p0 p1 p2
+    pages=$(( ${MEM_MB:-2048} * 256 ))
+    p0=$(( pages / 16 )); p1=$(( pages / 8 )); p2=$(( pages / 4 ))
+    [[ $p0 -lt 4096  ]] && p0=4096
+    [[ $p1 -lt 8192  ]] && p1=8192
+    [[ $p2 -lt 16384 ]] && p2=16384
+    echo "$p0 $p1 $p2"
+}
+
 # 按档位取缓冲区上限，再受内存上限保护
 tier_buffer_max() {
     local tier mem_cap rmem_max
@@ -231,9 +262,12 @@ tier_buffer_max() {
 }
 
 build_config() {
-    local rmem_max
+    local rmem_max twb orphans tcp_mem_tri
     # 按带宽档位选择缓冲区上限（并受内存上限保护）
     rmem_max="$(tier_buffer_max)"
+    twb="$(tw_buckets)"
+    orphans="$(tcp_orphans)"
+    tcp_mem_tri="$(tcp_mem_triplet)"
     info "带宽档位：$(tier_name "$(current_tier)") → 缓冲区上限 ${rmem_max}" >&2
 
     cat > /tmp/bbr-optimize.conf <<EOF
@@ -267,14 +301,23 @@ net.ipv4.tcp_fin_timeout = 15
 # 跨境链路专属优化
 net.ipv4.tcp_mtu_probing = 1
 net.ipv4.tcp_slow_start_after_idle = 0
-net.ipv4.tcp_no_metrics_save = 1
+net.ipv4.tcp_no_metrics_save = 0
 net.ipv4.tcp_tw_reuse = 1
 net.ipv4.tcp_window_scaling = 1
 
 # 高并发连接扩展优化
 net.ipv4.tcp_rfc1337 = 1
-net.ipv4.tcp_max_tw_buckets = ${TW_BUCKETS}
+net.ipv4.tcp_max_tw_buckets = ${twb}
+net.ipv4.tcp_max_orphans = ${orphans}
 net.ipv4.ip_local_port_range = ${IP_LOCAL_PORT_RANGE}
+
+# TCP 全局内存水位(页)：低/压力/硬上限
+net.ipv4.tcp_mem = ${tcp_mem_tri}
+
+# 长连接保活：更快发现手机切网/掉线后的失效连接
+net.ipv4.tcp_keepalive_time = ${TCP_KEEPALIVE_TIME}
+net.ipv4.tcp_keepalive_intvl = ${TCP_KEEPALIVE_INTVL}
+net.ipv4.tcp_keepalive_probes = ${TCP_KEEPALIVE_PROBES}
 EOF
 
     # 生成参数与修改原因清单（应用后展示）
@@ -293,10 +336,15 @@ net.ipv4.tcp_retries2|8|加快失败连接回收，减少无效重传与内存�
 net.ipv4.tcp_fin_timeout|15|缩短 FIN_WAIT 等待，加速连接释放
 net.ipv4.tcp_mtu_probing|1|开启路径 MTU 探测，规避大包被分片或丢包的黑洞
 net.ipv4.tcp_slow_start_after_idle|0|空闲重连不重置慢启动，利于低频长连接满速
-net.ipv4.tcp_no_metrics_save|1|不缓存路由度量，避免旧快照干扰新路径
+net.ipv4.tcp_no_metrics_save|0|保留最近一次连接的拥塞窗口，重复连接无需重新慢启动
 net.ipv4.tcp_tw_reuse|1|复用 TIME_WAIT 端口，降低高并发短连接端口不足
-net.ipv4.ip_local_port_range|${IP_LOCAL_PORT_RANGE}|放大本地源端口范围(原默认 32768~60999 偏窄)，支撑更高并发
-net.ipv4.tcp_max_tw_buckets|${TW_BUCKETS}|扩容 TIME_WAIT 桶(原 4096 偏小)，防连接洪峰被丢弃
+net.ipv4.ip_local_port_range|${IP_LOCAL_PORT_RANGE}|放大本地源端口范围(原默认 32768~60999 偏窄)，且避开低位系统服务端口
+net.ipv4.tcp_max_tw_buckets|${twb}|扩容 TIME_WAIT 桶到与端口范围宽度匹配，避免短连接洪峰时桶先溢出
+net.ipv4.tcp_max_orphans|${orphans}|提高孤儿 socket 上限，避免连接回收阶段被限流丢包
+net.ipv4.tcp_mem|${tcp_mem_tri}|按内存比例设置 TCP 全局内存水位(低/压力/硬上限)，避免开机低水位限制窗口上探
+net.ipv4.tcp_keepalive_time|${TCP_KEEPALIVE_TIME}|空闲连接 5 分钟即开始探测(原 7200s 太长)，手机切网/掉线能快速发现
+net.ipv4.tcp_keepalive_intvl|${TCP_KEEPALIVE_INTVL}|探测间隔 30s，配合 3 次探测约 90s 判定死连接
+net.ipv4.tcp_keepalive_probes|${TCP_KEEPALIVE_PROBES}|探测 3 次仍无响应即断开并释放资源
 net.ipv4.tcp_rfc1337|1|开启 RFC1337 防 TIME_WAIT 攻击
 EOF
 
@@ -383,6 +431,8 @@ verify_config() {
     echo -e "□ 拥塞控制算法：\n   当前 $(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo 未知)"
     echo -e "□ 队列算法：\n   当前 $(sysctl -n net.core.default_qdisc 2>/dev/null || echo 未知)"
     echo -e "□ 缓冲区上限(rmem_max)：\n   $(sysctl -n net.core.rmem_max 2>/dev/null || echo 未知)"
+    echo -e "□ 源端口范围 / TIME_WAIT 桶：\n   $(sysctl -n net.ipv4.ip_local_port_range 2>/dev/null || echo 未知) / $(sysctl -n net.ipv4.tcp_max_tw_buckets 2>/dev/null || echo 未知)"
+    echo -e "□ 长连接保活(时间/间隔/次数)：\n   $(sysctl -n net.ipv4.tcp_keepalive_time 2>/dev/null || echo 未知) / $(sysctl -n net.ipv4.tcp_keepalive_intvl 2>/dev/null || echo 未知) / $(sysctl -n net.ipv4.tcp_keepalive_probes 2>/dev/null || echo 未知)"
     echo -e "□ 内核 BBR 可用性：$(grep -qw bbr /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null && echo 可用 || echo 不可用)"
 }
 
@@ -417,13 +467,30 @@ health_check() {
     fi
 
     # 4. TIME_WAIT 桶
-    local twb
+    local twb twb_expect
     twb="$(sysctl -n net.ipv4.tcp_max_tw_buckets 2>/dev/null || echo -)"
-    if [[ "$twb" != "-" && "$twb" -lt 8192 ]]; then
-        warn "TIME_WAIT 桶(${twb})偏小：高并发可能丢连接，建议 ≥8192。"
+    twb_expect="$(tw_buckets)"
+    if [[ "$twb" != "-" && "$twb" -lt "$twb_expect" ]]; then
+        warn "TIME_WAIT 桶(${twb})小于源端口范围宽度：洪峰时桶先溢出，内核会强杀 TIME_WAIT（日志报 overflow），建议 ≥${twb_expect}。"
     fi
 
-    # 5. 是否存在旧的自定义优化段落（用户在脚本之外手动加的，可能与脚本段冲突）
+    # 5. 监听端口是否落在临时端口范围内（重载时可能被出站连接抢占而绑定失败）
+    if command -v ss >/dev/null 2>&1; then
+        local pend port conflict=""
+        pend="${port_range##* }"
+        while read -r port; do
+            [[ "$port" =~ ^[0-9]+$ ]] || continue
+            if [[ "$port" -ge "$pstart" && "$port" -le "$pend" ]]; then
+                conflict="${conflict} ${port}"
+            fi
+        done < <(ss -lntH 2>/dev/null | awk '{print $4}' | sed 's/.*://' | sort -u)
+        if [[ -n "$conflict" ]]; then
+            warn "监听端口${conflict} 落在临时端口范围(${port_range})内：出站连接可能占用同一端口，导致服务重载时绑定失败。"
+            info "  建议把这类端口排除出临时端口：sysctl -w net.ipv4.ip_local_reserved_ports=60058,60059（按需替换为实际端口）"
+        fi
+    fi
+
+    # 6. 是否存在旧的自定义优化段落（用户在脚本之外手动加的，可能与脚本段冲突）
     if grep -q "^net\.ipv4\.tcp_congestion_control\|^net\.ipv4\.tcp_rmem\|^net\.core\.rmem_max" "$SYSCTL_CONF"; then
         local elsewhere
         elsewhere=$(grep -n "^net\.ipv4\.tcp_congestion_control\|^net\.core\.rmem_max\|^net\.ipv4\.tcp_rmem" "$SYSCTL_CONF" \
@@ -433,7 +500,7 @@ health_check() {
         fi
     fi
 
-    # 6. 带宽档位提示
+    # 7. 带宽档位提示
     info "当前带宽档位: $(tier_label)，缓冲区上限 $(tier_buffer_max)；若与套餐实际带宽不符，用菜单 7 调整后重新应用。"
 
     echo ""
