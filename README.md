@@ -125,7 +125,7 @@ curl -fsSL https://github.com/hankepeng/bbr-optimize/releases/download/v1.0.0/bb
 | `8` | 在线升级脚本 | 检查 GitHub Release 最新版本，确认后原地升级并自动重启 |
 | `0` | 退出 | 退出脚本 |
 
-> 菜单标题栏会显示当前脚本版本号（如 `v1.0.7`）。
+> 菜单标题栏会显示当前脚本版本号（如 `v1.0.8`）。
 
 选择 `1` 应用后，会额外输出 **「本次修改的参数与原因」清单**与**「健康检查与建议」**，帮助你了解每一项改动的作用。
 
@@ -188,20 +188,43 @@ net.ipv4.tcp_fin_timeout = 15
 ```
 net.ipv4.tcp_mtu_probing = 1
 net.ipv4.tcp_slow_start_after_idle = 0
-net.ipv4.tcp_no_metrics_save = 1
+net.ipv4.tcp_no_metrics_save = 0
 net.ipv4.tcp_tw_reuse = 1
 net.ipv4.tcp_window_scaling = 1
 ```
+> `tcp_no_metrics_save = 0` 会保留最近一次连接的拥塞窗口/慢启动阈值，同一目标重复连接时不必从慢启动重新爬坡。
 
 ### 高并发连接扩展优化
 ```
-# 放大本地源端口范围（默认 32768~60999 偏窄，高并发短连接易端口不足）
-net.ipv4.ip_local_port_range = 1024 65535
-# 扩容 TIME_WAIT 桶（默认 4096 偏小，连接洪峰可能被丢）
-net.ipv4.tcp_max_tw_buckets = 8192
+# 放大本地源端口范围（默认 32768~60999 偏窄），并避开 1024~9999 的低位系统服务端口
+net.ipv4.ip_local_port_range = 10000 65535
+# TIME_WAIT 桶：与端口范围宽度匹配，按内存 16384 / 32768 / 65536 三档
+net.ipv4.tcp_max_tw_buckets = 65536
+# 孤儿 socket 上限，按内存 8192 / 16384 / 32768 三档
+net.ipv4.tcp_max_orphans = 32768
 # 开启 RFC1337，防 TIME_WAIT 攻击
 net.ipv4.tcp_rfc1337 = 1
 ```
+
+> TIME_WAIT 桶的作用是**上限**而非“连接数开关”。桶溢出时内核不会丢弃新连接，而是提前回收 TIME_WAIT 条目并打印 `TCP: time wait bucket table overflow`；副作用是端口复用的时序保护被缩短。把桶设到与端口范围同量级，可减少这类强杀。
+> 内存开销：65536 个 TIME_WAIT 约 20~30MB，仅在 2GB 及以上机器启用该档。
+
+### TCP 全局内存水位
+```
+# 单位：页（1 页 = 4KB）。按物理内存 6.25% / 12.5% / 25% 计算
+net.ipv4.tcp_mem = 32768 65536 131072
+```
+> 三段分别是「低水位 / 压力水位 / 硬上限」。内核开机时也会按内存自动算一套，但用的是**开机时可用内存**，若开机瞬间内存紧张，算出来的值会偏低（常见如 22530/30042/45060），进而限制窗口上探。脚本按 `MemTotal` 重算，避免这个偏差。
+> 注意：不建议照搬「65536 131072 262144」这类固定值——在 2GB 机器上硬上限 1GB，一旦连接数暴涨容易把应用内存挤掉。
+
+### 长连接保活
+```
+net.ipv4.tcp_keepalive_time = 300
+net.ipv4.tcp_keepalive_intvl = 30
+net.ipv4.tcp_keepalive_probes = 3
+```
+> 默认 `7200` 秒意味着空闲连接要 2 小时才发第一个探测包，手机切网/掉线后的死连接会一直占着资源。改为「5 分钟开始探测 + 30 秒间隔 + 3 次失败即断开」，约 90 秒就能发现死连接。
+> 前提：应用需开启 `SO_KEEPALIVE`（多数代理程序默认开启）。
 
 ---
 
@@ -219,6 +242,10 @@ sysctl net.core.rmem_max
 
 # 确认内核可用的拥塞控制中包含 bbr
 cat /proc/sys/net/ipv4/tcp_available_congestion_control
+
+# 确认高并发相关参数
+sysctl net.ipv4.ip_local_port_range net.ipv4.tcp_max_tw_buckets
+sysctl net.ipv4.tcp_keepalive_time net.ipv4.tcp_keepalive_intvl net.ipv4.tcp_keepalive_probes
 ```
 
 预期输出（`rmem_max` 的具体数值取决于所选带宽档位）：
