@@ -12,7 +12,7 @@ set -euo pipefail
 
 # ---------- 全局变量 ----------
 # 脚本版本号（在线升级时会读取远端脚本中的同名变量做比较）
-SCRIPT_VERSION="1.0.9"
+SCRIPT_VERSION="1.0.10"
 # 在线升级用的下载地址（/releases/latest/download/ 永远指向最新发布）
 REMOTE_SCRIPT_URL="https://github.com/hankepeng/bbr-optimize/releases/latest/download/bbr-optimize.sh"
 SYSCTL_CONF="/etc/sysctl.conf"
@@ -27,12 +27,12 @@ MEM_LARGE_MB="1800"
 # 带宽档位：缓冲区上限按"带宽 × RTT"的 BDP 量级估算，留足余量
 #   1 = ≤10Mbps     → 4M    （常见入门轻量套餐，BDP 仅百 KB 级）
 #   2 = 10-100Mbps  → 16M   （主流轻量套餐）
-#   3 = ≥100Mbps    → 64M   （大带宽 / 千兆，BDP 可达数十 MB）
+#   3 = ≥100Mbps    → 64M   （大带宽 / 千兆，BDP 可达数十 MB）【默认档位】
 TIER_FILE="/etc/bbr-optimize.tier"
 TIER_1_MAX="4194304"
 TIER_2_MAX="16777216"
 TIER_3_MAX="67108864"
-DEFAULT_TIER="2"
+DEFAULT_TIER="3"
 # 默认收发缓冲(保持小值：只放大上限，避免小内存机器连接数一多即 OOM)
 RMEM_WMEM_DEFAULT="212992"
 # tcp_rmem/tcp_wmem 的默认段(三段式中间值)：256K
